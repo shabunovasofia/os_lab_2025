@@ -4,14 +4,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <inttypes.h>
 
 #include <getopt.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-
 #include "pthread.h"
+#include "mult_modulo.h"
 
 struct FactorialArgs {
   uint64_t begin;
@@ -19,30 +20,23 @@ struct FactorialArgs {
   uint64_t mod;
 };
 
-uint64_t MultModulo(uint64_t a, uint64_t b, uint64_t mod) {
-  uint64_t result = 0;
-  a = a % mod;
-  while (b > 0) {
-    if (b % 2 == 1)
-      result = (result + a) % mod;
-    a = (a * 2) % mod;
-    b /= 2;
-  }
-
-  return result % mod;
-}
 
 uint64_t Factorial(const struct FactorialArgs *args) {
   uint64_t ans = 1;
 
-  // TODO: your code here
+  // TODO: your code here - вычисление факториала в заданном диапазоне
+  for (uint64_t i = args->begin; i <= args->end; i++) {
+    ans = MultModulo(ans, i, args->mod);
+  }
 
   return ans;
 }
 
 void *ThreadFactorial(void *args) {
   struct FactorialArgs *fargs = (struct FactorialArgs *)args;
-  return (void *)(uint64_t *)Factorial(fargs);
+  uint64_t *result = malloc(sizeof(uint64_t));
+  *result = Factorial(fargs);
+  return (void *)result;
 }
 
 int main(int argc, char **argv) {
@@ -67,11 +61,19 @@ int main(int argc, char **argv) {
       switch (option_index) {
       case 0:
         port = atoi(optarg);
-        // TODO: your code here
+        // TODO: your code here - проверка порта
+        if (port <= 0 || port > 65535) {
+          fprintf(stderr, "Invalid port number: %d\n", port);
+          return 1;
+        }
         break;
       case 1:
         tnum = atoi(optarg);
-        // TODO: your code here
+        // TODO: your code here - проверка числа потоков
+        if (tnum <= 0) {
+          fprintf(stderr, "Number of threads must be positive: %d\n", tnum);
+          return 1;
+        }
         break;
       default:
         printf("Index %d is out of options\n", option_index);
@@ -117,7 +119,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  printf("Server listening at %d\n", port);
+  printf("Server listening at %d with %d threads\n", port, tnum);
 
   while (true) {
     struct sockaddr_in client;
@@ -154,14 +156,31 @@ int main(int argc, char **argv) {
       memcpy(&end, from_client + sizeof(uint64_t), sizeof(uint64_t));
       memcpy(&mod, from_client + 2 * sizeof(uint64_t), sizeof(uint64_t));
 
-      fprintf(stdout, "Receive: %llu %llu %llu\n", begin, end, mod);
+      fprintf(stdout, "Receive: %" PRIu64 " %" PRIu64 " %" PRIu64 "\n", begin, end, mod);
 
       struct FactorialArgs args[tnum];
+      // ВСТАВКА КОДА - Распределение работы между потоками сервера
+      uint64_t range = end - begin + 1;
+      uint64_t step = range / tnum;
+      uint64_t remainder = range % tnum;
+      
       for (uint32_t i = 0; i < tnum; i++) {
-        // TODO: parallel somehow
-        args[i].begin = 1;
-        args[i].end = 1;
+        // TODO: parallel somehow - распределяем диапазоны вычислений
+        args[i].begin = begin + i * step;
+        if (i < remainder) {
+          args[i].begin += i;
+        } else {
+          args[i].begin += remainder;
+        }
+        
+        args[i].end = (i == tnum - 1) ? end : args[i].begin + step - 1;
+        if (i < remainder) {
+          args[i].end += 1;
+        }
+        
         args[i].mod = mod;
+        
+       printf("Thread %d: computing [%" PRIu64 ", %" PRIu64 "] mod %" PRIu64 "\n", i, args[i].begin, args[i].end, mod);
 
         if (pthread_create(&threads[i], NULL, ThreadFactorial,
                            (void *)&args[i])) {
@@ -172,20 +191,24 @@ int main(int argc, char **argv) {
 
       uint64_t total = 1;
       for (uint32_t i = 0; i < tnum; i++) {
-        uint64_t result = 0;
-        pthread_join(threads[i], (void **)&result);
-        total = MultModulo(total, result, mod);
-      }
+          uint64_t *result = NULL;
+          pthread_join(threads[i], (void **)&result);
+          if (result != NULL) {
+          total = MultModulo(total, *result, mod);
+          free(result);
+         }
+        }
 
-      printf("Total: %llu\n", total);
+        printf("Total: %" PRIu64 "\n", total);
 
-      char buffer[sizeof(total)];
-      memcpy(buffer, &total, sizeof(total));
-      err = send(client_fd, buffer, sizeof(total), 0);
-      if (err < 0) {
-        fprintf(stderr, "Can't send data to client\n");
-        break;
+      char buffer[sizeof(uint64_t)];
+      memcpy(buffer, &total, sizeof(uint64_t));
+      ssize_t sent = send(client_fd, buffer, sizeof(uint64_t), 0);
+      if (sent != sizeof(uint64_t)) {
+      fprintf(stderr, "Failed to send complete data: sent %zd of %zu bytes\n", 
+          sent, sizeof(uint64_t));
       }
+      // КОНЕЦ ВСТАВКИ
     }
 
     shutdown(client_fd, SHUT_RDWR);
